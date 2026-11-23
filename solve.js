@@ -135,22 +135,37 @@ function valueOf(key, raw) {
 }
 
 function parseFrontMatter(text) {
-  const lines = text.split('\n');
-  if (lines[0] !== '---') return { error: 'no front matter' };
+  let nl = text.indexOf('\n');
+  if ((nl === -1 ? text : text.slice(0, nl)) !== '---') return { error: 'no front matter' };
+  // The close is found first, before any line is validated: a source whose
+  // front matter never closes reports that, whatever its lines hold.
+  let pos = nl === -1 ? text.length : nl + 1;
   let close = -1;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') {
+  let closeEnd = -1;
+  let i = 1;
+  while (pos < text.length) {
+    nl = text.indexOf('\n', pos);
+    const line = nl === -1 ? text.slice(pos) : text.slice(pos, nl);
+    if (line === '---') {
       close = i;
+      closeEnd = nl === -1 ? text.length : nl + 1;
       break;
     }
+    pos = nl === -1 ? text.length : nl + 1;
+    i++;
   }
   if (close === -1) return { error: 'the front matter is not closed' };
   const data = {};
-  for (let i = 1; i < close; i++) {
-    const line = lines[i];
-    if (/^[ \t]*$/.test(line) || line.startsWith('#')) continue;
+  pos = text.indexOf('\n') + 1;
+  for (let k = 1; k < close; k++) {
+    nl = text.indexOf('\n', pos);
+    const line = nl === -1 ? text.slice(pos) : text.slice(pos, nl);
+    if (/^[ \t]*$/.test(line) || line.startsWith('#')) {
+      pos = nl === -1 ? text.length : nl + 1;
+      continue;
+    }
     const m = LINE.exec(line);
-    if (!m) return { error: `line ${i + 1} is not "key: value"` };
+    if (!m) return { error: `line ${k + 1} is not "key: value"` };
     const key = m[1];
     const raw = (m[2] ?? '').replace(/[ \t]+$/, '');
     if (!KEYS.includes(key)) return { error: `unknown key "${key}"` };
@@ -159,9 +174,10 @@ function parseFrontMatter(text) {
     const v = valueOf(key, raw);
     if ('error' in v) return v;
     data[key] = v.value;
+    pos = nl === -1 ? text.length : nl + 1;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
-  return { data, body: lines.slice(close + 1).join('\n') };
+  return { data, body: text.slice(closeEnd) };
 }
 
 // ---------------------------------------------------------------- Markdown
@@ -228,72 +244,74 @@ function findSingleStar(s, from) {
   return -1;
 }
 
-/** `s` rendered inline; `env.link(target)` is a link's href. Literal runs are sliced and
- * escaped in bulk; no character is ever copied one at a time. */
+/** `s` rendered inline; `env.link(target)` is a link's href. A native scan jumps
+ * straight to the next special character; literal runs are sliced and escaped
+ * in bulk; no character is ever copied one at a time. */
+const SPECIAL = /[\\`*[]/g;
 function inline(s, env) {
   const out = [];
-  let rs = 0; // start of the current literal run
-  const flushTo = (end) => {
-    if (end > rs) out.push(escapeHtml(s.slice(rs, end)));
-  };
-  let i = 0;
+  let rs = 0;
   const len = s.length;
-  while (i < len) {
-    const c = s[i];
-    if (c === '\\' && i + 1 < len && ESCAPABLE.has(s[i + 1])) {
-      flushTo(i);
-      out.push(escapeHtml(s[i + 1]));
-      i += 2;
-      rs = i;
+  SPECIAL.lastIndex = 0;
+  while (true) {
+    const m = SPECIAL.exec(s);
+    if (m === null) break;
+    const j = m.index;
+    const c = s[j];
+    if (c === '\\' && j + 1 < len && ESCAPABLE.has(s[j + 1])) {
+      if (j > rs) out.push(escapeHtml(s.slice(rs, j)));
+      out.push(escapeHtml(s[j + 1]));
+      rs = j + 2;
+      SPECIAL.lastIndex = rs;
       continue;
     }
     if (c === '`') {
-      const j = s.indexOf('`', i + 1);
-      if (j > i + 1) {
-        flushTo(i);
-        out.push('<code>', escapeHtml(s.slice(i + 1, j)), '</code>');
-        i = j + 1;
-        rs = i;
-      } else i++;
+      const k = s.indexOf('`', j + 1);
+      if (k > j + 1) {
+        if (j > rs) out.push(escapeHtml(s.slice(rs, j)));
+        out.push('<code>', escapeHtml(s.slice(j + 1, k)), '</code>');
+        rs = k + 1;
+        SPECIAL.lastIndex = rs;
+      } else SPECIAL.lastIndex = j + 1;
       continue;
     }
     if (c === '*') {
-      if (s[i + 1] === '*') {
-        const j = findUnescaped(s, '**', i + 2);
-        if (j > i + 2) {
-          flushTo(i);
-          out.push('<strong>', inline(s.slice(i + 2, j), env), '</strong>');
-          i = j + 2;
-          rs = i;
-        } else i += 2;
+      if (s[j + 1] === '*') {
+        const k = findUnescaped(s, '**', j + 2);
+        if (k > j + 2) {
+          if (j > rs) out.push(escapeHtml(s.slice(rs, j)));
+          out.push('<strong>', inline(s.slice(j + 2, k), env), '</strong>');
+          rs = k + 2;
+          SPECIAL.lastIndex = rs;
+        } else SPECIAL.lastIndex = j + 2;
         continue;
       }
-      const j = findSingleStar(s, i + 1);
-      if (j > i + 1) {
-        flushTo(i);
-        out.push('<em>', inline(s.slice(i + 1, j), env), '</em>');
-        i = j + 1;
-        rs = i;
-      } else i++;
+      const k = findSingleStar(s, j + 1);
+      if (k > j + 1) {
+        if (j > rs) out.push(escapeHtml(s.slice(rs, j)));
+        out.push('<em>', inline(s.slice(j + 1, k), env), '</em>');
+        rs = k + 1;
+        SPECIAL.lastIndex = rs;
+      } else SPECIAL.lastIndex = j + 1;
       continue;
     }
     if (c === '[') {
-      const k = findUnescaped(s, ']', i + 1);
-      const m = k !== -1 && s[k + 1] === '(' ? s.indexOf(')', k + 2) : -1;
-      const target = m === -1 ? '' : s.slice(k + 2, m);
+      const k = findUnescaped(s, ']', j + 1);
+      const mm = k !== -1 && s[k + 1] === '(' ? s.indexOf(')', k + 2) : -1;
+      const target = mm === -1 ? '' : s.slice(k + 2, mm);
       if (target !== '' && !/\s/.test(target)) {
-        flushTo(i);
-        out.push('<a href="', escapeHtml(env.link(target)), '">', inline(s.slice(i + 1, k), env), '</a>');
-        i = m + 1;
-        rs = i;
+        if (j > rs) out.push(escapeHtml(s.slice(rs, j)));
+        out.push('<a href="', escapeHtml(env.link(target)), '">', inline(s.slice(j + 1, k), env), '</a>');
+        rs = mm + 1;
+        SPECIAL.lastIndex = rs;
         continue;
       }
-      i++;
+      SPECIAL.lastIndex = j + 1;
       continue;
     }
-    i++;
+    SPECIAL.lastIndex = j + 1;
   }
-  flushTo(len);
+  if (len > rs) out.push(escapeHtml(s.slice(rs, len)));
   return out.join('');
 }
 
@@ -398,7 +416,7 @@ function renderMarkdown(src, env) {
     if (excerpt === null) excerpt = html;
     blocks.push(`<p>${html}</p>`);
   }
-  return { html: blocks.map((b) => `${b}\n`).join(''), toc, excerpt: excerpt ?? '' };
+  return { html: blocks.length === 0 ? '' : `${blocks.join('\n')}\n`, toc, excerpt: excerpt ?? '' };
 }
 
 // ---------------------------------------------------------------- templates
@@ -583,9 +601,17 @@ function compileTemplateFresh(nodes) {
 
 /** The words of a body: its runs of characters other than whitespace, counted without building them. */
 function wordsOf(text) {
-  const re = /\S+/g;
   let n = 0;
-  while (re.exec(text) !== null) n++;
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c > 32) {
+      if (c < 127 || (c !== 160 && c !== 0x1680 && !(c >= 0x2000 && c <= 0x200a) && c !== 0x2028 && c !== 0x2029 && c !== 0x202f && c !== 0x205f && c !== 0x3000 && c !== 0xfeff)) {
+        if (!inWord) { inWord = true; n++; }
+      } else inWord = false;
+    } else if (c === 32 || (c >= 9 && c <= 13)) inWord = false;
+    else if (!inWord) { inWord = true; n++; }
+  }
   return n;
 }
 
@@ -616,9 +642,9 @@ function cardOf(s) {
   };
 }
 
-function pageOf(s) {
+function pageOf(s, card) {
   return {
-    ...cardOf(s),
+    ...card,
     slug: s.slug,
     content: s.html,
     toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
@@ -745,7 +771,7 @@ export function build(input) {
   }
   const tags = [...bySlug.values()].sort((x, y) => y.posts.length - x.posts.length || byCodeUnits(x.slug, y.slug));
   const output = {};
-  const cards = new Map(posts.map((p) => [p, cardOf(p)]));
+  const cards = new Map(kept.map((s) => [s, cardOf(s)]));
   const site = { title: input.site.title, base_url: base };
   const allTags = tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = posts.slice(0, input.site.recent).map((p) => cards.get(p));
@@ -754,7 +780,7 @@ export function build(input) {
     return fn === undefined ? null : fn([{ site, tags: allTags, recent, ...vars }], templates, 0);
   };
   const tagOf = (t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => cards.get(p)) });
-  for (const s of kept) output[`${s.outDir}/index.html`] = render(s.layout, { page: pageOf(s) });
+  for (const s of kept) output[`${s.outDir}/index.html`] = render(s.layout, { page: pageOf(s, cards.get(s)) });
   const per = input.site.per_page;
   const pages = Math.max(1, Math.ceil(posts.length / per));
   const indexUrl = (k) => (k === 1 ? `${base}/` : `${base}/page/${k}/`);

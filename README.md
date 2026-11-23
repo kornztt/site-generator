@@ -16,9 +16,14 @@ Speed, without changing any result:
 
 - Templates are compiled once to JavaScript functions instead of being walked
   as a node tree on every render.
-- Markdown renders in one pass, with literal runs sliced and escaped in bulk —
-  no token objects and no per-character work.
+- Markdown renders in one pass: a native scan jumps straight to the next
+  special character, literal runs are sliced and escaped in bulk — no token
+  objects and no per-character work.
 - Slug results are memoised, since titles and tag names repeat constantly.
+- Words are counted with a plain character scan, not a regex, and each source's
+  card is built once (a page reuses its card instead of building it twice).
+- Front matter is scanned with `indexOf`, and the body stays a slice of the
+  source instead of being split apart and joined back together.
 
 Verified on the kit's practice instance: 3 of 3 cases identical to the
 reference (practice score 1000), plus 120 differential-fuzz cases (mutated
